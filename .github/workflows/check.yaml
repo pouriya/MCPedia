@@ -1,0 +1,32 @@
+name: Check
+
+on:
+  push:
+    branches:
+      - "*"
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Format check
+        run: |
+          test -z "$(gofmt -l .)" || (gofmt -l . && exit 1)
+
+      - name: Vet
+        run: CGO_ENABLED=1 go vet -mod=vendor ./...
+
+      - name: Test with coverage
+        run: CGO_ENABLED=1 go test -mod=vendor -race -count=1 -coverprofile=cover.out ./...
+
+      - name: Show coverage
+        run: go tool cover -func=cover.out

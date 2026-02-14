@@ -1,0 +1,45 @@
+name: Docker Build & Push
+
+on:
+  push:
+    tags:
+      - '*'
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build Docker image
+        run: make docker
+
+      - name: Tag images for registry
+        run: |
+          docker tag mcpedia:latest ghcr.io/${{ github.repository_owner }}/mcpedia:latest
+          docker tag mcpedia:latest ghcr.io/${{ github.repository_owner }}/mcpedia:${{ github.ref_name }}
+
+      - name: Push images to registry
+        run: |
+          docker push ghcr.io/${{ github.repository_owner }}/mcpedia:latest
+          docker push ghcr.io/${{ github.repository_owner }}/mcpedia:${{ github.ref_name }}
