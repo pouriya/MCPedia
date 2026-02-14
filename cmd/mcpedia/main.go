@@ -3,6 +3,7 @@ package main
 import (
 	"flag"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -66,6 +67,7 @@ Environment variables:
   MCPEDIA_DB      Database path (default: %s)
   MCPEDIA_ADDR    Server address (default: :8080)
   MCPEDIA_TOKEN   Bearer token for auth
+  MCPEDIA_DEBUG   Enable debug logging (any non-empty value)
 
 Run 'mcpedia <command> --help' for more information.
 `, defaultDB)
@@ -95,11 +97,23 @@ func cmdServe(args []string) {
 	dbPath := fs.String("db", "", "Database path")
 	addr := fs.String("addr", "", "Listen address")
 	token := fs.String("token", "", "Bearer token for auth (empty = no auth)")
+	debug := fs.Bool("debug", false, "Enable debug logging")
 	fs.Parse(args)
 
 	path := resolve(*dbPath, "MCPEDIA_DB", defaultDB)
 	listenAddr := resolve(*addr, "MCPEDIA_ADDR", ":8080")
 	authToken := resolve(*token, "MCPEDIA_TOKEN", "")
+
+	if !*debug && os.Getenv("MCPEDIA_DEBUG") != "" {
+		*debug = true
+	}
+
+	level := slog.LevelInfo
+	if *debug {
+		level = slog.LevelDebug
+	}
+	logger := slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
+	slog.SetDefault(logger)
 
 	d, err := db.Open(path)
 	if err != nil {
@@ -114,13 +128,12 @@ func cmdServe(args []string) {
 	// Also handle root for convenience
 	mux.Handle("/", server)
 
-	fmt.Printf("MCPedia server starting on %s (db: %s", listenAddr, path)
-	if authToken != "" {
-		fmt.Print(", auth: enabled")
-	} else {
-		fmt.Print(", auth: disabled")
-	}
-	fmt.Println(")")
+	slog.Info("server starting",
+		"addr", listenAddr,
+		"db", path,
+		"auth", authToken != "",
+		"debug", *debug,
+	)
 
 	if err := http.ListenAndServe(listenAddr, mux); err != nil {
 		fatal("serve: %v", err)

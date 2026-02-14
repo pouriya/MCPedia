@@ -7,10 +7,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/pouriya/mcpedia/internal/db"
 )
@@ -27,6 +29,34 @@ type Server struct {
 	DB       *db.DB
 	Token    string // empty = no auth required
 	sessions sync.Map
+}
+
+// --- response writer wrapper ---
+
+type responseWriter struct {
+	http.ResponseWriter
+	status      int
+	bytes       int
+	wroteHeader bool
+	rpcMethod   string
+}
+
+func (rw *responseWriter) WriteHeader(code int) {
+	if !rw.wroteHeader {
+		rw.status = code
+		rw.wroteHeader = true
+	}
+	rw.ResponseWriter.WriteHeader(code)
+}
+
+func (rw *responseWriter) Write(b []byte) (int, error) {
+	if !rw.wroteHeader {
+		rw.wroteHeader = true
+		rw.status = http.StatusOK
+	}
+	n, err := rw.ResponseWriter.Write(b)
+	rw.bytes += n
+	return n, err
 }
 
 // --- JSON-RPC types ---
@@ -62,6 +92,36 @@ func rpcErr(id any, code int, msg string) *jsonrpcResponse {
 // --- HTTP handler ---
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	start := time.Now()
+	rw := &responseWriter{ResponseWriter: w, status: http.StatusOK}
+
+	s.serveRequest(rw, r)
+
+	duration := time.Since(start)
+
+	if slog.Default().Enabled(r.Context(), slog.LevelDebug) {
+		slog.Debug("http request detail",
+			"method", r.Method,
+			"path", r.URL.Path,
+			"status", rw.status,
+			"duration_ms", duration.Milliseconds(),
+			"rpc_method", rw.rpcMethod,
+			"remote_addr", r.RemoteAddr,
+			"user_agent", r.UserAgent(),
+			"response_bytes", rw.bytes,
+		)
+	} else {
+		slog.Info("http request",
+			"method", r.Method,
+			"path", r.URL.Path,
+			"status", rw.status,
+			"duration_ms", duration.Milliseconds(),
+			"rpc_method", rw.rpcMethod,
+		)
+	}
+}
+
+func (s *Server) serveRequest(w *responseWriter, r *http.Request) {
 	// Only accept POST
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -88,6 +148,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, rpcErr(nil, -32700, "Parse error"))
 		return
 	}
+
+	w.rpcMethod = req.Method
 
 	if req.JSONRPC != "2.0" {
 		writeJSON(w, http.StatusOK, rpcErr(req.ID, -32600, "Invalid request: jsonrpc must be 2.0"))
@@ -182,7 +244,9 @@ func (s *Server) handleInitialize(req jsonrpcRequest) *jsonrpcResponse {
 // --- Tools ---
 
 func (s *Server) handleToolsList(req jsonrpcRequest) *jsonrpcResponse {
-	return rpcResult(req.ID, map[string]any{"tools": toolDefinitions()})
+	tools := toolDefinitions()
+	slog.Info("tool call", "tool", "list", "items", len(tools))
+	return rpcResult(req.ID, map[string]any{"tools": tools})
 }
 
 func (s *Server) handleToolsCall(req jsonrpcRequest) *jsonrpcResponse {
@@ -244,6 +308,7 @@ func (s *Server) toolSearchEntries(id any, args map[string]any) *jsonrpcResponse
 	if err != nil {
 		return toolError(id, err.Error())
 	}
+	slog.Info("tool call", "tool", "search_entries", "query", query, "items", len(entries))
 	return toolResult(id, entries)
 }
 
@@ -256,6 +321,7 @@ func (s *Server) toolGetEntry(id any, args map[string]any) *jsonrpcResponse {
 	if err != nil {
 		return toolError(id, err.Error())
 	}
+	slog.Info("tool call", "tool", "get_entry", "slug", slug)
 	return toolResult(id, entry)
 }
 
@@ -272,6 +338,7 @@ func (s *Server) toolGetEntriesByContext(id any, args map[string]any) *jsonrpcRe
 	if err != nil {
 		return toolError(id, err.Error())
 	}
+	slog.Info("tool call", "tool", "get_entries_by_context", "items", len(entries))
 	return toolResult(id, entries)
 }
 
@@ -286,6 +353,7 @@ func (s *Server) toolListEntries(id any, args map[string]any) *jsonrpcResponse {
 	if err != nil {
 		return toolError(id, err.Error())
 	}
+	slog.Info("tool call", "tool", "list_entries", "items", len(entries))
 	return toolResult(id, entries)
 }
 
@@ -294,6 +362,7 @@ func (s *Server) toolListTags(id any) *jsonrpcResponse {
 	if err != nil {
 		return toolError(id, err.Error())
 	}
+	slog.Info("tool call", "tool", "list_tags", "items", len(tags))
 	return toolResult(id, tags)
 }
 
@@ -321,6 +390,7 @@ func (s *Server) toolCreateEntry(id any, args map[string]any) *jsonrpcResponse {
 	if err := s.DB.CreateEntry(e); err != nil {
 		return toolError(id, err.Error())
 	}
+	slog.Info("tool call", "tool", "create_entry", "slug", slug)
 	return toolResult(id, e)
 }
 
@@ -349,6 +419,7 @@ func (s *Server) toolUpdateEntry(id any, args map[string]any) *jsonrpcResponse {
 	if err != nil {
 		return toolError(id, err.Error())
 	}
+	slog.Info("tool call", "tool", "update_entry", "slug", slug)
 	return toolResult(id, entry)
 }
 
@@ -363,6 +434,7 @@ func (s *Server) toolDeleteEntry(id any, args map[string]any) *jsonrpcResponse {
 	if err := s.DB.DeleteEntry(slug); err != nil {
 		return toolError(id, err.Error())
 	}
+	slog.Info("tool call", "tool", "delete_entry", "slug", slug)
 	return toolResult(id, map[string]string{"deleted": slug})
 }
 
@@ -416,6 +488,7 @@ func (s *Server) handleResourcesList(req jsonrpcRequest) *jsonrpcResponse {
 	if end < len(entries) {
 		result["nextCursor"] = base64.StdEncoding.EncodeToString([]byte(strconv.Itoa(end)))
 	}
+	slog.Info("resource call", "resource", "list", "items", len(resources), "total", len(entries))
 	return rpcResult(req.ID, result)
 }
 
@@ -437,6 +510,7 @@ func (s *Server) handleResourcesRead(req jsonrpcRequest) *jsonrpcResponse {
 		return rpcErr(req.ID, -32002, err.Error())
 	}
 
+	slog.Info("resource call", "resource", "read", "slug", slug)
 	return rpcResult(req.ID, map[string]any{
 		"contents": []map[string]any{
 			{
@@ -449,6 +523,7 @@ func (s *Server) handleResourcesRead(req jsonrpcRequest) *jsonrpcResponse {
 }
 
 func (s *Server) handleResourcesTemplatesList(req jsonrpcRequest) *jsonrpcResponse {
+	slog.Info("resource call", "resource", "templates_list", "items", 1)
 	return rpcResult(req.ID, map[string]any{
 		"resourceTemplates": []map[string]any{
 			{
@@ -464,6 +539,7 @@ func (s *Server) handleResourcesTemplatesList(req jsonrpcRequest) *jsonrpcRespon
 // --- Prompts ---
 
 func (s *Server) handlePromptsList(req jsonrpcRequest) *jsonrpcResponse {
+	slog.Info("prompt call", "prompt", "list", "items", 3)
 	return rpcResult(req.ID, map[string]any{
 		"prompts": []map[string]any{
 			{
@@ -511,6 +587,7 @@ func (s *Server) handlePromptsGet(req jsonrpcRequest) *jsonrpcResponse {
 		if err != nil {
 			return rpcErr(req.ID, -32602, err.Error())
 		}
+		slog.Info("prompt call", "prompt", "apply-entry", "slug", slug)
 		return rpcResult(req.ID, map[string]any{
 			"description": "Apply entry: " + entry.Title,
 			"messages": []map[string]any{
@@ -533,6 +610,7 @@ func (s *Server) handlePromptsGet(req jsonrpcRequest) *jsonrpcResponse {
 		if err != nil {
 			return rpcErr(req.ID, -32602, err.Error())
 		}
+		slog.Info("prompt call", "prompt", "review-with-entry", "slug", slug)
 		return rpcResult(req.ID, map[string]any{
 			"description": "Review with entry: " + entry.Title,
 			"messages": []map[string]any{
@@ -547,6 +625,7 @@ func (s *Server) handlePromptsGet(req jsonrpcRequest) *jsonrpcResponse {
 		})
 
 	case "save-learnings":
+		slog.Info("prompt call", "prompt", "save-learnings")
 		return rpcResult(req.ID, map[string]any{
 			"description": "Save learnings from the current task",
 			"messages": []map[string]any{
