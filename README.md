@@ -2,6 +2,19 @@
 
 A knowledge base server for AI agents via the [Model Context Protocol](https://modelcontextprotocol.io/) (MCP). MCPedia stores, searches, and manages reusable knowledge entries -- skills, rules, patterns, guides, and references -- accessible to AI coding agents like Cursor, Codex, Claude, and others through the MCP standard.
 
+## Why MCPedia?
+
+AI coding agents like Cursor, Claude, and Codex are powerful -- but they forget everything between sessions. MCPedia gives them **persistent memory**. You teach your agent something once (a coding pattern, a project convention, a debugging trick) and it remembers it forever.
+
+**What can you do with it?**
+
+- **Save knowledge** -- capture coding patterns, project rules, style guides, or anything your agent should know
+- **Search & retrieve** -- your agent can search by keyword, filter by language/domain/project, or pull entries by context
+- **Share across agents** -- the same knowledge base works with any MCP-compatible agent, so switching tools doesn't mean starting over
+- **Stay in control** -- lock the database when you don't want agents making changes, unlock it when you do
+
+Think of it as a personal wiki that your AI agents can read and write to, automatically.
+
 ## Core Concepts
 
 ### Entries
