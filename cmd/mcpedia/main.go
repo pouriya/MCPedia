@@ -1,14 +1,18 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"text/tabwriter"
+	"time"
 
 	"github.com/pouriya/mcpedia/internal/db"
 	"github.com/pouriya/mcpedia/internal/mcp"
@@ -122,11 +126,16 @@ func cmdServe(args []string) {
 	defer d.Close()
 
 	server := &mcp.Server{DB: d, Token: authToken}
-
 	mux := http.NewServeMux()
 	mux.Handle("/mcp", server)
-	// Also handle root for convenience
 	mux.Handle("/", server)
+
+	srv := &http.Server{Addr: listenAddr, Handler: mux}
+	go func() {
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			fatal("serve: %v", err)
+		}
+	}()
 
 	slog.Info("server starting",
 		"addr", listenAddr,
@@ -135,9 +144,17 @@ func cmdServe(args []string) {
 		"debug", *debug,
 	)
 
-	if err := http.ListenAndServe(listenAddr, mux); err != nil {
-		fatal("serve: %v", err)
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+	<-quit
+
+	slog.Info("shutting down")
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		fatal("shutdown: %v", err)
 	}
+	slog.Info("server stopped")
 }
 
 // --- add ---
@@ -186,7 +203,7 @@ func cmdAdd(args []string) {
 		Project:     *project,
 		Tags:        parseTags(*tags),
 	}
-	if err := d.CreateEntry(e); err != nil {
+	if err := d.CreateEntry(context.Background(), e); err != nil {
 		fatal("create: %v", err)
 	}
 
@@ -261,11 +278,11 @@ func cmdEdit(args []string) {
 		os.Exit(1)
 	}
 
-	if err := d.UpdateEntry(*slug, fields); err != nil {
+	if err := d.UpdateEntry(context.Background(), *slug, fields); err != nil {
 		fatal("update: %v", err)
 	}
 
-	entry, err := d.GetEntry(*slug)
+	entry, err := d.GetEntry(context.Background(), *slug)
 	if err != nil {
 		fatal("get: %v", err)
 	}
@@ -298,7 +315,7 @@ func cmdList(args []string) {
 	}
 	defer d.Close()
 
-	entries, err := d.ListEntries(db.Filter{
+	entries, err := d.ListEntries(context.Background(), db.Filter{
 		Kind:     *kind,
 		Language: *language,
 		Domain:   *domain,
@@ -344,7 +361,7 @@ func cmdLock(args []string) {
 	}
 	defer d.Close()
 
-	if err := d.Lock(*token); err != nil {
+	if err := d.Lock(context.Background(), *token); err != nil {
 		fatal("lock: %v", err)
 	}
 	fmt.Println("Database locked. AI write operations are now disabled.")
@@ -371,7 +388,7 @@ func cmdUnlock(args []string) {
 	}
 	defer d.Close()
 
-	if err := d.Unlock(*token); err != nil {
+	if err := d.Unlock(context.Background(), *token); err != nil {
 		fatal("unlock: %v", err)
 	}
 	fmt.Println("Database unlocked. AI write operations are now enabled.")
@@ -393,7 +410,7 @@ func cmdExport(args []string) {
 	}
 	defer d.Close()
 
-	entries, err := d.AllEntries()
+	entries, err := d.AllEntries(context.Background())
 	if err != nil {
 		fatal("export: %v", err)
 	}

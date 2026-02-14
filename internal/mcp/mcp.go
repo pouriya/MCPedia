@@ -1,6 +1,7 @@
 package mcp
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/hex"
@@ -22,6 +23,7 @@ const (
 	serverName       = "mcpedia"
 	serverVersion    = "0.1.0"
 	resourcesPerPage = 50
+	maxRequestBody   = 1 << 20 // 1 MiB
 )
 
 // Server implements the MCP protocol over HTTP.
@@ -137,7 +139,7 @@ func (s *Server) serveRequest(w *responseWriter, r *http.Request) {
 		}
 	}
 
-	body, err := io.ReadAll(r.Body)
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxRequestBody))
 	if err != nil {
 		http.Error(w, "Bad request", http.StatusBadRequest)
 		return
@@ -174,7 +176,7 @@ func (s *Server) serveRequest(w *responseWriter, r *http.Request) {
 		}
 	}
 
-	resp := s.dispatch(req)
+	resp := s.dispatch(r.Context(), req)
 
 	// For initialize, set session header
 	if req.Method == "initialize" && resp.Error == nil {
@@ -194,7 +196,7 @@ func (s *Server) handleNotification(req jsonrpcRequest) {
 	// notifications/cancelled -- nothing to do
 }
 
-func (s *Server) dispatch(req jsonrpcRequest) *jsonrpcResponse {
+func (s *Server) dispatch(ctx context.Context, req jsonrpcRequest) *jsonrpcResponse {
 	switch req.Method {
 	case "initialize":
 		return s.handleInitialize(req)
@@ -203,17 +205,17 @@ func (s *Server) dispatch(req jsonrpcRequest) *jsonrpcResponse {
 	case "tools/list":
 		return s.handleToolsList(req)
 	case "tools/call":
-		return s.handleToolsCall(req)
+		return s.handleToolsCall(ctx, req)
 	case "resources/list":
-		return s.handleResourcesList(req)
+		return s.handleResourcesList(ctx, req)
 	case "resources/read":
-		return s.handleResourcesRead(req)
+		return s.handleResourcesRead(ctx, req)
 	case "resources/templates/list":
 		return s.handleResourcesTemplatesList(req)
 	case "prompts/list":
 		return s.handlePromptsList(req)
 	case "prompts/get":
-		return s.handlePromptsGet(req)
+		return s.handlePromptsGet(ctx, req)
 	default:
 		return rpcErr(req.ID, -32601, "Method not found: "+req.Method)
 	}
@@ -249,7 +251,7 @@ func (s *Server) handleToolsList(req jsonrpcRequest) *jsonrpcResponse {
 	return rpcResult(req.ID, map[string]any{"tools": tools})
 }
 
-func (s *Server) handleToolsCall(req jsonrpcRequest) *jsonrpcResponse {
+func (s *Server) handleToolsCall(ctx context.Context, req jsonrpcRequest) *jsonrpcResponse {
 	var params struct {
 		Name      string         `json:"name"`
 		Arguments map[string]any `json:"arguments"`
@@ -260,28 +262,28 @@ func (s *Server) handleToolsCall(req jsonrpcRequest) *jsonrpcResponse {
 
 	switch params.Name {
 	case "search_entries":
-		return s.toolSearchEntries(req.ID, params.Arguments)
+		return s.toolSearchEntries(ctx, req.ID, params.Arguments)
 	case "get_entry":
-		return s.toolGetEntry(req.ID, params.Arguments)
+		return s.toolGetEntry(ctx, req.ID, params.Arguments)
 	case "get_entries_by_context":
-		return s.toolGetEntriesByContext(req.ID, params.Arguments)
+		return s.toolGetEntriesByContext(ctx, req.ID, params.Arguments)
 	case "list_entries":
-		return s.toolListEntries(req.ID, params.Arguments)
+		return s.toolListEntries(ctx, req.ID, params.Arguments)
 	case "list_tags":
-		return s.toolListTags(req.ID)
+		return s.toolListTags(ctx, req.ID)
 	case "create_entry":
-		return s.toolCreateEntry(req.ID, params.Arguments)
+		return s.toolCreateEntry(ctx, req.ID, params.Arguments)
 	case "update_entry":
-		return s.toolUpdateEntry(req.ID, params.Arguments)
+		return s.toolUpdateEntry(ctx, req.ID, params.Arguments)
 	case "delete_entry":
-		return s.toolDeleteEntry(req.ID, params.Arguments)
+		return s.toolDeleteEntry(ctx, req.ID, params.Arguments)
 	default:
 		return rpcErr(req.ID, -32602, "Unknown tool: "+params.Name)
 	}
 }
 
-func (s *Server) checkLock() error {
-	locked, err := s.DB.IsLocked()
+func (s *Server) checkLock(ctx context.Context) error {
+	locked, err := s.DB.IsLocked(ctx)
 	if err != nil {
 		return err
 	}
@@ -291,7 +293,7 @@ func (s *Server) checkLock() error {
 	return nil
 }
 
-func (s *Server) toolSearchEntries(id any, args map[string]any) *jsonrpcResponse {
+func (s *Server) toolSearchEntries(ctx context.Context, id any, args map[string]any) *jsonrpcResponse {
 	query := str(args, "query")
 	if query == "" {
 		return toolError(id, "query is required")
@@ -304,7 +306,7 @@ func (s *Server) toolSearchEntries(id any, args map[string]any) *jsonrpcResponse
 		Project:  str(args, "project"),
 		Tag:      str(args, "tag"),
 	}
-	entries, err := s.DB.SearchEntries(query, f, limit)
+	entries, err := s.DB.SearchEntries(ctx, query, f, limit)
 	if err != nil {
 		return toolError(id, err.Error())
 	}
@@ -312,12 +314,12 @@ func (s *Server) toolSearchEntries(id any, args map[string]any) *jsonrpcResponse
 	return toolResult(id, entries)
 }
 
-func (s *Server) toolGetEntry(id any, args map[string]any) *jsonrpcResponse {
+func (s *Server) toolGetEntry(ctx context.Context, id any, args map[string]any) *jsonrpcResponse {
 	slug := str(args, "slug")
 	if slug == "" {
 		return toolError(id, "slug is required")
 	}
-	entry, err := s.DB.GetEntry(slug)
+	entry, err := s.DB.GetEntry(ctx, slug)
 	if err != nil {
 		return toolError(id, err.Error())
 	}
@@ -325,7 +327,7 @@ func (s *Server) toolGetEntry(id any, args map[string]any) *jsonrpcResponse {
 	return toolResult(id, entry)
 }
 
-func (s *Server) toolGetEntriesByContext(id any, args map[string]any) *jsonrpcResponse {
+func (s *Server) toolGetEntriesByContext(ctx context.Context, id any, args map[string]any) *jsonrpcResponse {
 	limit := intVal(args, "limit", 20)
 	f := db.Filter{
 		Kind:     str(args, "kind"),
@@ -334,7 +336,7 @@ func (s *Server) toolGetEntriesByContext(id any, args map[string]any) *jsonrpcRe
 		Project:  str(args, "project"),
 		Tags:     strSlice(args, "tags"),
 	}
-	entries, err := s.DB.GetEntriesByContext(f, limit)
+	entries, err := s.DB.GetEntriesByContext(ctx, f, limit)
 	if err != nil {
 		return toolError(id, err.Error())
 	}
@@ -342,14 +344,14 @@ func (s *Server) toolGetEntriesByContext(id any, args map[string]any) *jsonrpcRe
 	return toolResult(id, entries)
 }
 
-func (s *Server) toolListEntries(id any, args map[string]any) *jsonrpcResponse {
+func (s *Server) toolListEntries(ctx context.Context, id any, args map[string]any) *jsonrpcResponse {
 	f := db.Filter{
 		Kind:     str(args, "kind"),
 		Language: str(args, "language"),
 		Domain:   str(args, "domain"),
 		Project:  str(args, "project"),
 	}
-	entries, err := s.DB.ListEntries(f)
+	entries, err := s.DB.ListEntries(ctx, f)
 	if err != nil {
 		return toolError(id, err.Error())
 	}
@@ -357,8 +359,8 @@ func (s *Server) toolListEntries(id any, args map[string]any) *jsonrpcResponse {
 	return toolResult(id, entries)
 }
 
-func (s *Server) toolListTags(id any) *jsonrpcResponse {
-	tags, err := s.DB.ListTags()
+func (s *Server) toolListTags(ctx context.Context, id any) *jsonrpcResponse {
+	tags, err := s.DB.ListTags(ctx)
 	if err != nil {
 		return toolError(id, err.Error())
 	}
@@ -366,8 +368,8 @@ func (s *Server) toolListTags(id any) *jsonrpcResponse {
 	return toolResult(id, tags)
 }
 
-func (s *Server) toolCreateEntry(id any, args map[string]any) *jsonrpcResponse {
-	if err := s.checkLock(); err != nil {
+func (s *Server) toolCreateEntry(ctx context.Context, id any, args map[string]any) *jsonrpcResponse {
+	if err := s.checkLock(ctx); err != nil {
 		return toolError(id, err.Error())
 	}
 	slug := str(args, "slug")
@@ -387,15 +389,15 @@ func (s *Server) toolCreateEntry(id any, args map[string]any) *jsonrpcResponse {
 		Project:     str(args, "project"),
 		Tags:        strSlice(args, "tags"),
 	}
-	if err := s.DB.CreateEntry(e); err != nil {
+	if err := s.DB.CreateEntry(ctx, e); err != nil {
 		return toolError(id, err.Error())
 	}
 	slog.Info("tool call", "tool", "create_entry", "slug", slug)
 	return toolResult(id, e)
 }
 
-func (s *Server) toolUpdateEntry(id any, args map[string]any) *jsonrpcResponse {
-	if err := s.checkLock(); err != nil {
+func (s *Server) toolUpdateEntry(ctx context.Context, id any, args map[string]any) *jsonrpcResponse {
+	if err := s.checkLock(ctx); err != nil {
 		return toolError(id, err.Error())
 	}
 	slug := str(args, "slug")
@@ -411,11 +413,11 @@ func (s *Server) toolUpdateEntry(id any, args map[string]any) *jsonrpcResponse {
 	if v, ok := args["tags"]; ok {
 		fields["tags"] = v
 	}
-	if err := s.DB.UpdateEntry(slug, fields); err != nil {
+	if err := s.DB.UpdateEntry(ctx, slug, fields); err != nil {
 		return toolError(id, err.Error())
 	}
 	// Return the updated entry
-	entry, err := s.DB.GetEntry(slug)
+	entry, err := s.DB.GetEntry(ctx, slug)
 	if err != nil {
 		return toolError(id, err.Error())
 	}
@@ -423,15 +425,15 @@ func (s *Server) toolUpdateEntry(id any, args map[string]any) *jsonrpcResponse {
 	return toolResult(id, entry)
 }
 
-func (s *Server) toolDeleteEntry(id any, args map[string]any) *jsonrpcResponse {
-	if err := s.checkLock(); err != nil {
+func (s *Server) toolDeleteEntry(ctx context.Context, id any, args map[string]any) *jsonrpcResponse {
+	if err := s.checkLock(ctx); err != nil {
 		return toolError(id, err.Error())
 	}
 	slug := str(args, "slug")
 	if slug == "" {
 		return toolError(id, "slug is required")
 	}
-	if err := s.DB.DeleteEntry(slug); err != nil {
+	if err := s.DB.DeleteEntry(ctx, slug); err != nil {
 		return toolError(id, err.Error())
 	}
 	slog.Info("tool call", "tool", "delete_entry", "slug", slug)
@@ -440,7 +442,7 @@ func (s *Server) toolDeleteEntry(id any, args map[string]any) *jsonrpcResponse {
 
 // --- Resources ---
 
-func (s *Server) handleResourcesList(req jsonrpcRequest) *jsonrpcResponse {
+func (s *Server) handleResourcesList(ctx context.Context, req jsonrpcRequest) *jsonrpcResponse {
 	var params struct {
 		Cursor string `json:"cursor"`
 	}
@@ -456,7 +458,7 @@ func (s *Server) handleResourcesList(req jsonrpcRequest) *jsonrpcResponse {
 		}
 	}
 
-	entries, err := s.DB.ListEntries(db.Filter{})
+	entries, err := s.DB.ListEntries(ctx, db.Filter{})
 	if err != nil {
 		return rpcErr(req.ID, -32603, err.Error())
 	}
@@ -492,7 +494,7 @@ func (s *Server) handleResourcesList(req jsonrpcRequest) *jsonrpcResponse {
 	return rpcResult(req.ID, result)
 }
 
-func (s *Server) handleResourcesRead(req jsonrpcRequest) *jsonrpcResponse {
+func (s *Server) handleResourcesRead(ctx context.Context, req jsonrpcRequest) *jsonrpcResponse {
 	var params struct {
 		URI string `json:"uri"`
 	}
@@ -505,7 +507,7 @@ func (s *Server) handleResourcesRead(req jsonrpcRequest) *jsonrpcResponse {
 		return rpcErr(req.ID, -32002, "Invalid resource URI: "+params.URI)
 	}
 
-	entry, err := s.DB.GetEntry(slug)
+	entry, err := s.DB.GetEntry(ctx, slug)
 	if err != nil {
 		return rpcErr(req.ID, -32002, err.Error())
 	}
@@ -568,7 +570,7 @@ func (s *Server) handlePromptsList(req jsonrpcRequest) *jsonrpcResponse {
 	})
 }
 
-func (s *Server) handlePromptsGet(req jsonrpcRequest) *jsonrpcResponse {
+func (s *Server) handlePromptsGet(ctx context.Context, req jsonrpcRequest) *jsonrpcResponse {
 	var params struct {
 		Name      string            `json:"name"`
 		Arguments map[string]string `json:"arguments"`
@@ -583,7 +585,7 @@ func (s *Server) handlePromptsGet(req jsonrpcRequest) *jsonrpcResponse {
 		if slug == "" {
 			return rpcErr(req.ID, -32602, "slug argument is required")
 		}
-		entry, err := s.DB.GetEntry(slug)
+		entry, err := s.DB.GetEntry(ctx, slug)
 		if err != nil {
 			return rpcErr(req.ID, -32602, err.Error())
 		}
@@ -606,7 +608,7 @@ func (s *Server) handlePromptsGet(req jsonrpcRequest) *jsonrpcResponse {
 		if slug == "" {
 			return rpcErr(req.ID, -32602, "slug argument is required")
 		}
-		entry, err := s.DB.GetEntry(slug)
+		entry, err := s.DB.GetEntry(ctx, slug)
 		if err != nil {
 			return rpcErr(req.ID, -32602, err.Error())
 		}

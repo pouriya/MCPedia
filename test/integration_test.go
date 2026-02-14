@@ -2,6 +2,7 @@ package test
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -511,7 +512,7 @@ func TestStats(t *testing.T) {
 		toolCall(t, ts.URL, "get_entry", map[string]any{"slug": "st"})
 	}
 
-	stats, err := s.DB.GetStats("st")
+	stats, err := s.DB.GetStats(context.Background(), "st")
 	if err != nil {
 		t.Fatalf("get stats: %v", err)
 	}
@@ -523,13 +524,13 @@ func TestStats(t *testing.T) {
 	}
 
 	toolCall(t, ts.URL, "search_entries", map[string]any{"query": "unique stats content"})
-	stats, _ = s.DB.GetStats("st")
+	stats, _ = s.DB.GetStats(context.Background(), "st")
 	if stats.Searches < 1 {
 		t.Errorf("searches: got %d, want >= 1", stats.Searches)
 	}
 
 	toolCall(t, ts.URL, "update_entry", map[string]any{"slug": "st", "title": "Updated"})
-	stats, _ = s.DB.GetStats("st")
+	stats, _ = s.DB.GetStats(context.Background(), "st")
 	if stats.Updates < 1 {
 		t.Errorf("updates: got %d, want >= 1", stats.Updates)
 	}
@@ -539,7 +540,7 @@ func TestWriteWhenLocked(t *testing.T) {
 	s, ts := setup(t)
 	createEntry(t, ts.URL, "exists", "Exists", "content", "", "", "", "", nil)
 
-	if err := s.DB.Lock("secret"); err != nil {
+	if err := s.DB.Lock(context.Background(), "secret"); err != nil {
 		t.Fatalf("lock: %v", err)
 	}
 
@@ -568,10 +569,10 @@ func TestWriteWhenLocked(t *testing.T) {
 		t.Fatal("get_entry should work when locked")
 	}
 
-	if err := s.DB.Unlock("wrong"); err == nil {
+	if err := s.DB.Unlock(context.Background(), "wrong"); err == nil {
 		t.Fatal("expected error for wrong token")
 	}
-	if err := s.DB.Unlock("secret"); err != nil {
+	if err := s.DB.Unlock(context.Background(), "secret"); err != nil {
 		t.Fatalf("unlock: %v", err)
 	}
 
@@ -584,18 +585,18 @@ func TestWriteWhenLocked(t *testing.T) {
 func TestLockEdgeCases(t *testing.T) {
 	s, _ := setup(t)
 
-	if err := s.DB.Lock(""); err == nil {
+	if err := s.DB.Lock(context.Background(), ""); err == nil {
 		t.Fatal("expected error for empty token")
 	}
-	if err := s.DB.Lock("tok"); err != nil {
+	if err := s.DB.Lock(context.Background(), "tok"); err != nil {
 		t.Fatalf("lock: %v", err)
 	}
-	if err := s.DB.Lock("tok2"); err == nil {
+	if err := s.DB.Lock(context.Background(), "tok2"); err == nil {
 		t.Fatal("expected error for double lock")
 	}
 
-	s.DB.Unlock("tok")
-	if err := s.DB.Unlock("tok"); err == nil {
+	s.DB.Unlock(context.Background(), "tok")
+	if err := s.DB.Unlock(context.Background(), "tok"); err == nil {
 		t.Fatal("expected error for unlocking when not locked")
 	}
 }
@@ -912,7 +913,7 @@ func TestAllEntries(t *testing.T) {
 	createEntry(t, ts.URL, "all1", "All One", "content one", "skill", "go", "", "", []string{"x"})
 	createEntry(t, ts.URL, "all2", "All Two", "content two", "rule", "rust", "", "", []string{"y"})
 
-	entries, err := s.DB.AllEntries()
+	entries, err := s.DB.AllEntries(context.Background())
 	if err != nil {
 		t.Fatalf("all entries: %v", err)
 	}
@@ -1007,7 +1008,7 @@ func TestListEntriesWithProjectFilter(t *testing.T) {
 
 func TestGetStatsNotFound(t *testing.T) {
 	s, _ := setup(t)
-	_, err := s.DB.GetStats("nonexistent")
+	_, err := s.DB.GetStats(context.Background(), "nonexistent")
 	if err == nil {
 		t.Fatal("expected error for non-existent entry stats")
 	}
@@ -1058,7 +1059,7 @@ func TestReopenDB(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open1: %v", err)
 	}
-	d1.CreateEntry(&db.Entry{Slug: "persist", Title: "Persist", Content: "persisted"})
+	d1.CreateEntry(context.Background(), &db.Entry{Slug: "persist", Title: "Persist", Content: "persisted"})
 	d1.Close()
 
 	d2, err := db.Open(path)
@@ -1066,7 +1067,7 @@ func TestReopenDB(t *testing.T) {
 		t.Fatalf("open2: %v", err)
 	}
 	defer d2.Close()
-	got, err := d2.GetEntry("persist")
+	got, err := d2.GetEntry(context.Background(), "persist")
 	if err != nil {
 		t.Fatalf("get: %v", err)
 	}

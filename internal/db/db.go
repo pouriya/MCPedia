@@ -1,15 +1,24 @@
 package db
 
 import (
+	"context"
 	"crypto/sha256"
 	"database/sql"
 	_ "embed"
 	"encoding/hex"
+	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
+)
+
+// Sentinel errors for known failure conditions. Use errors.Is(err, db.ErrNotFound) to check.
+var (
+	ErrNotFound = errors.New("entry not found")
+	ErrLocked   = errors.New("database is locked")
 )
 
 //go:embed schema.sql
@@ -103,6 +112,10 @@ func Open(path string) (*DB, error) {
 			return nil, fmt.Errorf("create fts: %w", err)
 		}
 	}
+	// Connection pool limits (database/sql best practices)
+	sqlDB.SetMaxOpenConns(25)
+	sqlDB.SetMaxIdleConns(5)
+	sqlDB.SetConnMaxLifetime(5 * time.Minute)
 	return &DB{db: sqlDB}, nil
 }
 
@@ -112,14 +125,14 @@ func (d *DB) Close() error {
 }
 
 // CreateEntry inserts a new entry with its tags and stats row.
-func (d *DB) CreateEntry(e *Entry) error {
-	tx, err := d.db.Begin()
+func (d *DB) CreateEntry(ctx context.Context, e *Entry) error {
+	tx, err := d.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin: %w", err)
 	}
 	defer tx.Rollback()
 
-	res, err := tx.Exec(
+	res, err := tx.ExecContext(ctx,
 		`INSERT INTO entries (slug, title, description, content, kind, language, domain, project)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 		e.Slug, e.Title, e.Description, e.Content,
@@ -135,18 +148,18 @@ func (d *DB) CreateEntry(e *Entry) error {
 	e.ID = entryID
 
 	// Insert into FTS
-	if _, err := tx.Exec(`INSERT INTO entries_fts(rowid, title, description, content) VALUES (?, ?, ?, ?)`,
+	if _, err := tx.ExecContext(ctx, `INSERT INTO entries_fts(rowid, title, description, content) VALUES (?, ?, ?, ?)`,
 		entryID, e.Title, e.Description, e.Content); err != nil {
 		return fmt.Errorf("insert fts: %w", err)
 	}
 
 	// Insert stats row
-	if _, err := tx.Exec(`INSERT INTO entry_stats (entry_id) VALUES (?)`, entryID); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO entry_stats (entry_id) VALUES (?)`, entryID); err != nil {
 		return fmt.Errorf("insert stats: %w", err)
 	}
 
 	// Insert tags
-	if err := setTags(tx, entryID, e.Tags); err != nil {
+	if err := setTags(ctx, tx, entryID, e.Tags); err != nil {
 		return fmt.Errorf("set tags: %w", err)
 	}
 
@@ -155,42 +168,43 @@ func (d *DB) CreateEntry(e *Entry) error {
 	}
 
 	// Read back the created_at/updated_at/version that the DB set
-	row := d.db.QueryRow(`SELECT version, created_at, updated_at FROM entries WHERE id = ?`, entryID)
+	row := d.db.QueryRowContext(ctx, `SELECT version, created_at, updated_at FROM entries WHERE id = ?`, entryID)
 	return row.Scan(&e.Version, &e.CreatedAt, &e.UpdatedAt)
 }
 
 // GetEntry retrieves a full entry by slug and bumps the read counter.
-func (d *DB) GetEntry(slug string) (*Entry, error) {
+func (d *DB) GetEntry(ctx context.Context, slug string) (*Entry, error) {
 	e := &Entry{}
-	row := d.db.QueryRow(
+	row := d.db.QueryRowContext(ctx,
 		`SELECT id, slug, title, description, content, kind, language, domain, project, version, created_at, updated_at
 		 FROM entries WHERE slug = ?`, slug,
 	)
 	if err := row.Scan(&e.ID, &e.Slug, &e.Title, &e.Description, &e.Content,
 		&e.Kind, &e.Language, &e.Domain, &e.Project, &e.Version,
 		&e.CreatedAt, &e.UpdatedAt); err != nil {
-		if err == sql.ErrNoRows {
-			return nil, fmt.Errorf("entry not found: %s", slug)
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, fmt.Errorf("entry not found: %s: %w", slug, ErrNotFound)
 		}
 		return nil, fmt.Errorf("get entry: %w", err)
 	}
-	tags, err := getTagsForEntry(d.db, e.ID)
+	tags, err := getTagsForEntry(ctx, d.db, e.ID)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("get tags: %w", err)
 	}
 	e.Tags = tags
 
-	// Bump read stats
+	// Bump read stats (best-effort; do not fail the request)
 	now := time.Now().UTC().Format(time.DateTime)
-	d.db.Exec(`UPDATE entry_stats SET reads = reads + 1, last_read_at = ? WHERE entry_id = ?`, now, e.ID)
-
+	if _, err := d.db.ExecContext(ctx, `UPDATE entry_stats SET reads = reads + 1, last_read_at = ? WHERE entry_id = ?`, now, e.ID); err != nil {
+		slog.Debug("update read stats", "err", err, "entry_id", e.ID)
+	}
 	return e, nil
 }
 
 // UpdateEntry updates only the provided fields for the entry identified by slug.
 // Supported keys: title, description, content, kind, language, domain, project, tags.
-func (d *DB) UpdateEntry(slug string, fields map[string]any) error {
-	tx, err := d.db.Begin()
+func (d *DB) UpdateEntry(ctx context.Context, slug string, fields map[string]any) error {
+	tx, err := d.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin: %w", err)
 	}
@@ -198,9 +212,9 @@ func (d *DB) UpdateEntry(slug string, fields map[string]any) error {
 
 	// Get entry ID
 	var entryID int64
-	if err := tx.QueryRow(`SELECT id FROM entries WHERE slug = ?`, slug).Scan(&entryID); err != nil {
-		if err == sql.ErrNoRows {
-			return fmt.Errorf("entry not found: %s", slug)
+	if err := tx.QueryRowContext(ctx, `SELECT id FROM entries WHERE slug = ?`, slug).Scan(&entryID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("entry not found: %s: %w", slug, ErrNotFound)
 		}
 		return fmt.Errorf("lookup: %w", err)
 	}
@@ -218,19 +232,19 @@ func (d *DB) UpdateEntry(slug string, fields map[string]any) error {
 	setClauses = append(setClauses, "version = version + 1", "updated_at = datetime('now')")
 	args = append(args, entryID)
 	query := "UPDATE entries SET " + strings.Join(setClauses, ", ") + " WHERE id = ?"
-	if _, err := tx.Exec(query, args...); err != nil {
+	if _, err := tx.ExecContext(ctx, query, args...); err != nil {
 		return fmt.Errorf("update entry: %w", err)
 	}
 
 	// Sync FTS: delete old row, re-insert with current values from entries
-	if _, err := tx.Exec(`DELETE FROM entries_fts WHERE rowid = ?`, entryID); err != nil {
+	if _, err := tx.ExecContext(ctx, `DELETE FROM entries_fts WHERE rowid = ?`, entryID); err != nil {
 		return fmt.Errorf("fts delete: %w", err)
 	}
 	var ftsTitle, ftsDesc, ftsContent string
-	if err := tx.QueryRow(`SELECT title, description, content FROM entries WHERE id = ?`, entryID).Scan(&ftsTitle, &ftsDesc, &ftsContent); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT title, description, content FROM entries WHERE id = ?`, entryID).Scan(&ftsTitle, &ftsDesc, &ftsContent); err != nil {
 		return fmt.Errorf("fts read: %w", err)
 	}
-	if _, err := tx.Exec(`INSERT INTO entries_fts(rowid, title, description, content) VALUES (?, ?, ?, ?)`,
+	if _, err := tx.ExecContext(ctx, `INSERT INTO entries_fts(rowid, title, description, content) VALUES (?, ?, ?, ?)`,
 		entryID, ftsTitle, ftsDesc, ftsContent); err != nil {
 		return fmt.Errorf("fts insert: %w", err)
 	}
@@ -248,14 +262,14 @@ func (d *DB) UpdateEntry(slug string, fields map[string]any) error {
 				}
 			}
 		}
-		if err := setTags(tx, entryID, tagList); err != nil {
+		if err := setTags(ctx, tx, entryID, tagList); err != nil {
 			return fmt.Errorf("update tags: %w", err)
 		}
 	}
 
 	// Bump update stats
 	now := time.Now().UTC().Format(time.DateTime)
-	if _, err := tx.Exec(`UPDATE entry_stats SET updates = updates + 1, last_update_at = ? WHERE entry_id = ?`, now, entryID); err != nil {
+	if _, err := tx.ExecContext(ctx, `UPDATE entry_stats SET updates = updates + 1, last_update_at = ? WHERE entry_id = ?`, now, entryID); err != nil {
 		return fmt.Errorf("update stats: %w", err)
 	}
 
@@ -263,28 +277,32 @@ func (d *DB) UpdateEntry(slug string, fields map[string]any) error {
 }
 
 // DeleteEntry removes an entry by slug. CASCADE handles entry_tags and entry_stats.
-func (d *DB) DeleteEntry(slug string) error {
-	// Get the ID first so we can clean up FTS
+// FTS and entry deletion are done in a single transaction for consistency.
+func (d *DB) DeleteEntry(ctx context.Context, slug string) error {
+	tx, err := d.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin: %w", err)
+	}
+	defer tx.Rollback()
+
 	var entryID int64
-	if err := d.db.QueryRow(`SELECT id FROM entries WHERE slug = ?`, slug).Scan(&entryID); err != nil {
-		if err == sql.ErrNoRows {
-			return fmt.Errorf("entry not found: %s", slug)
+	if err := tx.QueryRowContext(ctx, `SELECT id FROM entries WHERE slug = ?`, slug).Scan(&entryID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("entry not found: %s: %w", slug, ErrNotFound)
 		}
 		return fmt.Errorf("lookup: %w", err)
 	}
-	// Delete from FTS
-	if _, err := d.db.Exec(`DELETE FROM entries_fts WHERE rowid = ?`, entryID); err != nil {
+	if _, err := tx.ExecContext(ctx, `DELETE FROM entries_fts WHERE rowid = ?`, entryID); err != nil {
 		return fmt.Errorf("delete fts: %w", err)
 	}
-	// Delete the entry (CASCADE handles entry_tags and entry_stats)
-	if _, err := d.db.Exec(`DELETE FROM entries WHERE id = ?`, entryID); err != nil {
+	if _, err := tx.ExecContext(ctx, `DELETE FROM entries WHERE id = ?`, entryID); err != nil {
 		return fmt.Errorf("delete entry: %w", err)
 	}
-	return nil
+	return tx.Commit()
 }
 
 // ListEntries returns entries without content, optionally filtered.
-func (d *DB) ListEntries(f Filter) ([]Entry, error) {
+func (d *DB) ListEntries(ctx context.Context, f Filter) ([]Entry, error) {
 	query := `SELECT e.id, e.slug, e.title, e.description, e.kind, e.language, e.domain, e.project, e.version, e.created_at, e.updated_at FROM entries e`
 	args := []any{}
 	wheres := []string{}
@@ -314,7 +332,7 @@ func (d *DB) ListEntries(f Filter) ([]Entry, error) {
 	}
 	query += " ORDER BY e.title"
 
-	rows, err := d.db.Query(query, args...)
+	rows, err := d.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("list entries: %w", err)
 	}
@@ -326,7 +344,10 @@ func (d *DB) ListEntries(f Filter) ([]Entry, error) {
 		if err := rows.Scan(&e.ID, &e.Slug, &e.Title, &e.Description, &e.Kind, &e.Language, &e.Domain, &e.Project, &e.Version, &e.CreatedAt, &e.UpdatedAt); err != nil {
 			return nil, fmt.Errorf("scan: %w", err)
 		}
-		tags, _ := getTagsForEntry(d.db, e.ID)
+		tags, err := getTagsForEntry(ctx, d.db, e.ID)
+		if err != nil {
+			return nil, fmt.Errorf("get tags for entry %d: %w", e.ID, err)
+		}
 		e.Tags = tags
 		entries = append(entries, e)
 	}
@@ -334,7 +355,7 @@ func (d *DB) ListEntries(f Filter) ([]Entry, error) {
 }
 
 // SearchEntries runs FTS5 search with optional filters, returns entries with snippets (no full content).
-func (d *DB) SearchEntries(queryStr string, f Filter, limit int) ([]Entry, error) {
+func (d *DB) SearchEntries(ctx context.Context, queryStr string, f Filter, limit int) ([]Entry, error) {
 	if limit <= 0 || limit > 50 {
 		limit = 10
 	}
@@ -371,7 +392,7 @@ func (d *DB) SearchEntries(queryStr string, f Filter, limit int) ([]Entry, error
 	q += " ORDER BY rank LIMIT ?"
 	args = append(args, limit)
 
-	rows, err := d.db.Query(q, args...)
+	rows, err := d.db.QueryContext(ctx, q, args...)
 	if err != nil {
 		return nil, fmt.Errorf("search: %w", err)
 	}
@@ -384,17 +405,22 @@ func (d *DB) SearchEntries(queryStr string, f Filter, limit int) ([]Entry, error
 		if err := rows.Scan(&e.ID, &e.Slug, &e.Title, &e.Description, &e.Kind, &e.Language, &e.Domain, &e.Project, &e.Version, &e.CreatedAt, &e.UpdatedAt, &e.Snippet); err != nil {
 			return nil, fmt.Errorf("scan: %w", err)
 		}
-		tags, _ := getTagsForEntry(d.db, e.ID)
+		tags, err := getTagsForEntry(ctx, d.db, e.ID)
+		if err != nil {
+			return nil, fmt.Errorf("get tags for entry %d: %w", e.ID, err)
+		}
 		e.Tags = tags
 		entries = append(entries, e)
-		// Bump search stats
-		d.db.Exec(`UPDATE entry_stats SET searches = searches + 1, last_search_at = ? WHERE entry_id = ?`, now, e.ID)
+		// Bump search stats (best-effort)
+		if _, err := d.db.ExecContext(ctx, `UPDATE entry_stats SET searches = searches + 1, last_search_at = ? WHERE entry_id = ?`, now, e.ID); err != nil {
+			slog.Debug("update search stats", "err", err, "entry_id", e.ID)
+		}
 	}
 	return entries, rows.Err()
 }
 
 // GetEntriesByContext returns full entries matching the given filters (language, domain, kind, tags, project).
-func (d *DB) GetEntriesByContext(f Filter, limit int) ([]Entry, error) {
+func (d *DB) GetEntriesByContext(ctx context.Context, f Filter, limit int) ([]Entry, error) {
 	if limit <= 0 || limit > 50 {
 		limit = 20
 	}
@@ -439,7 +465,7 @@ func (d *DB) GetEntriesByContext(f Filter, limit int) ([]Entry, error) {
 	q += " ORDER BY e.title LIMIT ?"
 	args = append(args, limit)
 
-	rows, err := d.db.Query(q, args...)
+	rows, err := d.db.QueryContext(ctx, q, args...)
 	if err != nil {
 		return nil, fmt.Errorf("get by context: %w", err)
 	}
@@ -452,18 +478,23 @@ func (d *DB) GetEntriesByContext(f Filter, limit int) ([]Entry, error) {
 		if err := rows.Scan(&e.ID, &e.Slug, &e.Title, &e.Description, &e.Content, &e.Kind, &e.Language, &e.Domain, &e.Project, &e.Version, &e.CreatedAt, &e.UpdatedAt); err != nil {
 			return nil, fmt.Errorf("scan: %w", err)
 		}
-		tags, _ := getTagsForEntry(d.db, e.ID)
+		tags, err := getTagsForEntry(ctx, d.db, e.ID)
+		if err != nil {
+			return nil, fmt.Errorf("get tags for entry %d: %w", e.ID, err)
+		}
 		e.Tags = tags
 		entries = append(entries, e)
-		// Bump read stats
-		d.db.Exec(`UPDATE entry_stats SET reads = reads + 1, last_read_at = ? WHERE entry_id = ?`, now, e.ID)
+		// Bump read stats (best-effort)
+		if _, err := d.db.ExecContext(ctx, `UPDATE entry_stats SET reads = reads + 1, last_read_at = ? WHERE entry_id = ?`, now, e.ID); err != nil {
+			slog.Debug("update read stats", "err", err, "entry_id", e.ID)
+		}
 	}
 	return entries, rows.Err()
 }
 
 // ListTags returns all tags with their entry counts.
-func (d *DB) ListTags() ([]Tag, error) {
-	rows, err := d.db.Query(`SELECT t.name, COUNT(et.entry_id) as cnt FROM tags t JOIN entry_tags et ON et.tag_id = t.id GROUP BY t.id ORDER BY cnt DESC, t.name`)
+func (d *DB) ListTags(ctx context.Context) ([]Tag, error) {
+	rows, err := d.db.QueryContext(ctx, `SELECT t.name, COUNT(et.entry_id) as cnt FROM tags t JOIN entry_tags et ON et.tag_id = t.id GROUP BY t.id ORDER BY cnt DESC, t.name`)
 	if err != nil {
 		return nil, fmt.Errorf("list tags: %w", err)
 	}
@@ -481,15 +512,15 @@ func (d *DB) ListTags() ([]Tag, error) {
 }
 
 // GetStats returns usage statistics for an entry.
-func (d *DB) GetStats(slug string) (*EntryStats, error) {
+func (d *DB) GetStats(ctx context.Context, slug string) (*EntryStats, error) {
 	s := &EntryStats{}
-	err := d.db.QueryRow(
+	err := d.db.QueryRowContext(ctx,
 		`SELECT es.reads, es.searches, es.updates, es.last_read_at, es.last_search_at, es.last_update_at
 		 FROM entry_stats es JOIN entries e ON e.id = es.entry_id WHERE e.slug = ?`, slug,
 	).Scan(&s.Reads, &s.Searches, &s.Updates, &s.LastReadAt, &s.LastSearchAt, &s.LastUpdateAt)
 	if err != nil {
-		if err == sql.ErrNoRows {
-			return nil, fmt.Errorf("entry not found: %s", slug)
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, fmt.Errorf("entry not found: %s: %w", slug, ErrNotFound)
 		}
 		return nil, fmt.Errorf("get stats: %w", err)
 	}
@@ -497,8 +528,8 @@ func (d *DB) GetStats(slug string) (*EntryStats, error) {
 }
 
 // AllEntries returns all entries with full content and tags (for export).
-func (d *DB) AllEntries() ([]Entry, error) {
-	rows, err := d.db.Query(
+func (d *DB) AllEntries(ctx context.Context) ([]Entry, error) {
+	rows, err := d.db.QueryContext(ctx,
 		`SELECT id, slug, title, description, content, kind, language, domain, project, version, created_at, updated_at
 		 FROM entries ORDER BY slug`,
 	)
@@ -513,7 +544,10 @@ func (d *DB) AllEntries() ([]Entry, error) {
 		if err := rows.Scan(&e.ID, &e.Slug, &e.Title, &e.Description, &e.Content, &e.Kind, &e.Language, &e.Domain, &e.Project, &e.Version, &e.CreatedAt, &e.UpdatedAt); err != nil {
 			return nil, fmt.Errorf("scan: %w", err)
 		}
-		tags, _ := getTagsForEntry(d.db, e.ID)
+		tags, err := getTagsForEntry(ctx, d.db, e.ID)
+		if err != nil {
+			return nil, fmt.Errorf("get tags for entry %d: %w", e.ID, err)
+		}
 		e.Tags = tags
 		entries = append(entries, e)
 	}
@@ -521,37 +555,37 @@ func (d *DB) AllEntries() ([]Entry, error) {
 }
 
 // IsLocked returns true if the database write lock is active.
-func (d *DB) IsLocked() (bool, error) {
+func (d *DB) IsLocked(ctx context.Context) (bool, error) {
 	var active int
-	if err := d.db.QueryRow(`SELECT active FROM lock WHERE id = 1`).Scan(&active); err != nil {
+	if err := d.db.QueryRowContext(ctx, `SELECT active FROM lock WHERE id = 1`).Scan(&active); err != nil {
 		return false, fmt.Errorf("check lock: %w", err)
 	}
 	return active == 1, nil
 }
 
 // Lock activates the write lock with the given token. Fails if already locked.
-func (d *DB) Lock(token string) error {
+func (d *DB) Lock(ctx context.Context, token string) error {
 	if token == "" {
 		return fmt.Errorf("token must not be empty")
 	}
-	locked, err := d.IsLocked()
+	locked, err := d.IsLocked(ctx)
 	if err != nil {
 		return err
 	}
 	if locked {
-		return fmt.Errorf("database is already locked")
+		return fmt.Errorf("database is already locked: %w", ErrLocked)
 	}
 	hashed := hashToken(token)
-	_, err = d.db.Exec(`UPDATE lock SET active = 1, token = ? WHERE id = 1`, hashed)
+	_, err = d.db.ExecContext(ctx, `UPDATE lock SET active = 1, token = ? WHERE id = 1`, hashed)
 	return err
 }
 
 // Unlock deactivates the write lock. The provided token must match the one used to lock.
-func (d *DB) Unlock(token string) error {
+func (d *DB) Unlock(ctx context.Context, token string) error {
 	if token == "" {
 		return fmt.Errorf("token must not be empty")
 	}
-	locked, err := d.IsLocked()
+	locked, err := d.IsLocked(ctx)
 	if err != nil {
 		return err
 	}
@@ -559,13 +593,13 @@ func (d *DB) Unlock(token string) error {
 		return fmt.Errorf("database is not locked")
 	}
 	var storedHash string
-	if err := d.db.QueryRow(`SELECT token FROM lock WHERE id = 1`).Scan(&storedHash); err != nil {
+	if err := d.db.QueryRowContext(ctx, `SELECT token FROM lock WHERE id = 1`).Scan(&storedHash); err != nil {
 		return fmt.Errorf("read lock: %w", err)
 	}
 	if storedHash != hashToken(token) {
 		return fmt.Errorf("invalid token")
 	}
-	_, err = d.db.Exec(`UPDATE lock SET active = 0, token = '' WHERE id = 1`)
+	_, err = d.db.ExecContext(ctx, `UPDATE lock SET active = 0, token = '' WHERE id = 1`)
 	return err
 }
 
@@ -583,10 +617,14 @@ func defaultStr(s, def string) string {
 	return s
 }
 
+// querier is satisfied by *sql.DB and *sql.Tx for context-aware queries.
+type querier interface {
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+}
+
 // setTags replaces all tags for an entry within a transaction.
-func setTags(tx *sql.Tx, entryID int64, tags []string) error {
-	// Remove existing tags
-	if _, err := tx.Exec(`DELETE FROM entry_tags WHERE entry_id = ?`, entryID); err != nil {
+func setTags(ctx context.Context, tx *sql.Tx, entryID int64, tags []string) error {
+	if _, err := tx.ExecContext(ctx, `DELETE FROM entry_tags WHERE entry_id = ?`, entryID); err != nil {
 		return err
 	}
 	for _, tagName := range tags {
@@ -594,15 +632,14 @@ func setTags(tx *sql.Tx, entryID int64, tags []string) error {
 		if tagName == "" {
 			continue
 		}
-		// Upsert tag
-		if _, err := tx.Exec(`INSERT OR IGNORE INTO tags (name) VALUES (?)`, tagName); err != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO tags (name) VALUES (?)`, tagName); err != nil {
 			return err
 		}
 		var tagID int64
-		if err := tx.QueryRow(`SELECT id FROM tags WHERE name = ?`, tagName).Scan(&tagID); err != nil {
+		if err := tx.QueryRowContext(ctx, `SELECT id FROM tags WHERE name = ?`, tagName).Scan(&tagID); err != nil {
 			return err
 		}
-		if _, err := tx.Exec(`INSERT OR IGNORE INTO entry_tags (entry_id, tag_id) VALUES (?, ?)`, entryID, tagID); err != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO entry_tags (entry_id, tag_id) VALUES (?, ?)`, entryID, tagID); err != nil {
 			return err
 		}
 	}
@@ -610,10 +647,8 @@ func setTags(tx *sql.Tx, entryID int64, tags []string) error {
 }
 
 // getTagsForEntry returns all tag names for a given entry.
-func getTagsForEntry(querier interface {
-	Query(string, ...any) (*sql.Rows, error)
-}, entryID int64) ([]string, error) {
-	rows, err := querier.Query(
+func getTagsForEntry(ctx context.Context, q querier, entryID int64) ([]string, error) {
+	rows, err := q.QueryContext(ctx,
 		`SELECT t.name FROM tags t JOIN entry_tags et ON et.tag_id = t.id WHERE et.entry_id = ? ORDER BY t.name`, entryID,
 	)
 	if err != nil {
