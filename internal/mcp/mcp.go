@@ -16,9 +16,9 @@ import (
 )
 
 const (
-	protocolVersion = "2025-11-25"
-	serverName      = "mcpedia"
-	serverVersion   = "0.1.0"
+	protocolVersion  = "2025-11-25"
+	serverName       = "mcpedia"
+	serverVersion    = "0.1.0"
 	resourcesPerPage = 50
 )
 

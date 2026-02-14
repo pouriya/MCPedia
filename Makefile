@@ -35,8 +35,8 @@ test-cover:
 	go tool cover -func=cover.out
 
 fmt:
-	gofmt -l -d .
-	@test -z "$$(gofmt -l .)" || (echo "gofmt check failed" && exit 1)
+	gofmt -l -d $$(find . -name '*.go' -not -path './vendor/*')
+	@test -z "$$(gofmt -l $$(find . -name '*.go' -not -path './vendor/*'))" || (echo "gofmt check failed" && exit 1)
 
 vet:
 	CGO_ENABLED=$(CGO_ENABLED) go vet $(GOFLAGS) ./...
