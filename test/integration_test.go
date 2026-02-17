@@ -611,10 +611,14 @@ func TestResourcesList(t *testing.T) {
 		t.Fatalf("error: %+v", resp.Error)
 	}
 	resources := resp.Result.(map[string]any)["resources"].([]any)
-	if len(resources) != 2 {
-		t.Errorf("expected 2 resources, got %d", len(resources))
+	// Default how-to-use is always first, so 3 total
+	if len(resources) != 3 {
+		t.Errorf("expected 3 resources, got %d", len(resources))
 	}
 	r0 := resources[0].(map[string]any)
+	if r0["uri"] != "mcpedia://entries/how-to-use" {
+		t.Errorf("how-to-use must be first; got %s", r0["uri"])
+	}
 	if r0["mimeType"] != "text/markdown" {
 		t.Errorf("mimeType: %v", r0["mimeType"])
 	}
@@ -623,23 +627,47 @@ func TestResourcesList(t *testing.T) {
 	}
 }
 
-func TestResourcesListExcludesHowToUse(t *testing.T) {
+func TestResourcesListHowToUseFirst(t *testing.T) {
 	_, ts := setup(t)
-	createEntry(t, ts.URL, "aaa", "AAA", "content", "", "", "", "", nil)
-	args := map[string]any{"slug": "how-to-use", "title": "How-To", "content": "Guide", "description": "Guide"}
+	createEntry(t, ts.URL, "aaa-first", "AAA First", "content", "", "", "", "", nil)
+	// User's how-to-use overrides default - use distinct title to verify
+	args := map[string]any{"slug": "how-to-use", "title": "My Custom How-To", "content": "Custom content.", "description": "User's custom guide"}
 	toolCall(t, ts.URL, "create_entry", args)
 
-	// how-to-use is excluded from list; accessed via mcpedia://how-to-use only
+	_, resp := call(t, ts.URL, "resources/list", 1, nil, nil)
+	if resp.Error != nil {
+		t.Fatalf("error: %+v", resp.Error)
+	}
+	resources := resp.Result.(map[string]any)["resources"].([]any)
+	if len(resources) != 2 {
+		t.Fatalf("expected 2 resources, got %d", len(resources))
+	}
+	first := resources[0].(map[string]any)
+	if first["uri"] != "mcpedia://entries/how-to-use" {
+		t.Errorf("how-to-use must be first; got %s", first["uri"])
+	}
+	if first["title"] != "My Custom How-To" || first["description"] != "User's custom guide" {
+		t.Errorf("user's how-to-use should be used; got title=%v description=%v", first["title"], first["description"])
+	}
+}
+
+func TestResourcesListDefaultHowToUse(t *testing.T) {
+	_, ts := setup(t)
+	// No entries - default how-to-use should be injected
 	_, resp := call(t, ts.URL, "resources/list", 1, nil, nil)
 	if resp.Error != nil {
 		t.Fatalf("error: %+v", resp.Error)
 	}
 	resources := resp.Result.(map[string]any)["resources"].([]any)
 	if len(resources) != 1 {
-		t.Fatalf("expected 1 resource (how-to-use excluded), got %d", len(resources))
+		t.Fatalf("expected 1 resource (default how-to-use), got %d", len(resources))
 	}
-	if resources[0].(map[string]any)["uri"] == "mcpedia://entries/how-to-use" {
-		t.Error("how-to-use must not appear in resources list")
+	first := resources[0].(map[string]any)
+	if first["uri"] != "mcpedia://entries/how-to-use" {
+		t.Errorf("how-to-use must be first; got %s", first["uri"])
+	}
+	if !strings.Contains(first["description"].(string), "AI agents") {
+		t.Errorf("expected default description; got %v", first["description"])
 	}
 }
 
@@ -951,7 +979,7 @@ func TestResourcesPagination(t *testing.T) {
 		slug := fmt.Sprintf("pg-%03d", i)
 		createEntry(t, ts.URL, slug, "Page "+slug, "content", "", "", "", "", nil)
 	}
-	// Total: 55 (how-to-use excluded from list)
+	// Total: 56 (default how-to-use + 55 created)
 
 	_, resp := call(t, ts.URL, "resources/list", 1, nil, nil)
 	result := resp.Result.(map[string]any)
@@ -967,8 +995,8 @@ func TestResourcesPagination(t *testing.T) {
 	_, resp = call(t, ts.URL, "resources/list", 2, map[string]any{"cursor": nextCursor}, nil)
 	result = resp.Result.(map[string]any)
 	resources = result["resources"].([]any)
-	if len(resources) != 5 {
-		t.Errorf("second page: expected 5, got %d", len(resources))
+	if len(resources) != 6 {
+		t.Errorf("second page: expected 6, got %d", len(resources))
 	}
 	if _, has := result["nextCursor"]; has {
 		t.Error("should not have nextCursor on last page")

@@ -28,7 +28,7 @@ MCPedia is a knowledge base. You can read, search, and store reusable knowledge 
 
 ## Resources
 
-Entries are exposed as MCP resources. URI format: `mcpedia://entries/{slug}`. Use `resources/read` with that URI to fetch entry content. This guide is available at `mcpedia://how-to-use`—read it when you need usage instructions. Use `resources/templates/list` to discover available URIs.
+Entries are exposed as MCP resources. URI format: `mcpedia://entries/{slug}`. Use `resources/read` with that URI to fetch entry content. This guide (how-to-use) is always first in `resources/list` and also at `mcpedia://how-to-use`.
 
 ## Prompts
 

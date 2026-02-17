@@ -155,7 +155,7 @@ MCPedia implements the MCP protocol version `2025-11-25` over HTTP using JSON-RP
 
 ### Resources
 
-MCPedia exposes entries as MCP resources, allowing clients to browse and read knowledge entries using standard resource URIs. Usage instructions are available via a dedicated resource `mcpedia://how-to-use` (see `resources/templates/list`). If you have not added your own `how-to-use` entry, the built-in default is served; creating one replaces it. The how-to-use resource is not listed in `resources/list`—access it via the template URI.
+MCPedia exposes entries as MCP resources, allowing clients to browse and read knowledge entries using standard resource URIs. A built-in `how-to-use` entry is always available: if you have not added your own, the default content is served; creating one replaces it. The how-to-use resource is always first in `resources/list` and also available at `mcpedia://how-to-use` (see `resources/templates/list`).
 
 - **`resources/list`**
   - Returns a paginated list of all entries as resources
