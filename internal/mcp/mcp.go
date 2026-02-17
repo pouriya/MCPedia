@@ -473,14 +473,24 @@ func defaultHowToUseEntry() db.Entry {
 
 const howToUseURI = "mcpedia://how-to-use"
 
-// filterHowToUseFromList excludes how-to-use from the resources list; it is accessed via the dedicated URI instead.
-func filterHowToUseFromList(entries []db.Entry) []db.Entry {
-	out := make([]db.Entry, 0, len(entries))
-	for _, e := range entries {
-		if e.Slug != howToUseSlug {
+// ensureHowToUseFirst ensures how-to-use is first: moves it to front if present in DB, injects default if not.
+func ensureHowToUseFirst(entries []db.Entry) []db.Entry {
+	for i, e := range entries {
+		if e.Slug == howToUseSlug {
+			if i == 0 {
+				return entries
+			}
+			out := make([]db.Entry, 0, len(entries))
 			out = append(out, e)
+			out = append(out, entries[:i]...)
+			out = append(out, entries[i+1:]...)
+			return out
 		}
 	}
+	// Not in DB: prepend default (user can replace by creating their own)
+	out := make([]db.Entry, 0, len(entries)+1)
+	out = append(out, defaultHowToUseEntry())
+	out = append(out, entries...)
 	return out
 }
 
@@ -505,8 +515,8 @@ func (s *Server) handleResourcesList(ctx context.Context, req jsonrpcRequest) *j
 		return rpcErr(req.ID, -32603, err.Error())
 	}
 
-	// Exclude how-to-use from list; it is accessed via mcpedia://how-to-use
-	entries = filterHowToUseFromList(entries)
+	// Ensure how-to-use is first: from DB if user added one, else built-in default
+	entries = ensureHowToUseFirst(entries)
 
 	// Apply pagination
 	end := offset + resourcesPerPage
