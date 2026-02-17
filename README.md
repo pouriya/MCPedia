@@ -225,6 +225,7 @@ Commands:
   lock      Lock the database (prevent AI writes)
   unlock    Unlock the database
   export    Export all entries as Markdown files
+  import    Import a single entry from an export-format Markdown file
 ```
 
 ### `mcpedia init`
@@ -320,6 +321,26 @@ description: "Idiomatic error handling patterns in Rust"
 
 Use `Result<T, E>` for recoverable errors...
 ```
+
+### `mcpedia import`
+
+Import a single knowledge entry from a Markdown file that uses the same format as `mcpedia export` (YAML frontmatter between `---` delimiters, then the body). The entry **slug** is taken from the filename (e.g. `rust-error-handling.md` → slug `rust-error-handling`). If an entry with that slug already exists, import prints an error and exits; remove the existing entry first if you want to replace it.
+
+```bash
+mcpedia import --db ./mcpedia.db --file ./backup/rust-error-handling.md
+```
+
+The file must start with `---`, contain the required frontmatter keys (`title`, `kind`, `language`, `domain`, `project`, `tags`; `description` is optional), and use a closing `---` before the content. Unknown keys or invalid format cause a clear error and abort.
+
+### Seed data (learnings)
+
+The `learnings/` directory holds per-language seed Markdown files (export format) for Rust, Go, and Python. To load them into mcpedia:
+
+```bash
+make -C learnings build
+```
+
+Override the binary or database with `mcpedia_exe` and `mcpedia_db` (defaults: `mcpedia` and `mcpedia.db`). See `learnings/README.md` for the directory layout.
 
 ## Usage with Cursor
 
