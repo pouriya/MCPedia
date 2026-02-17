@@ -7,11 +7,13 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/pouriya/mcpedia/internal/db"
+	"github.com/pouriya/mcpedia/internal/importfm"
 	"github.com/pouriya/mcpedia/internal/mcp"
 )
 
@@ -1022,6 +1024,87 @@ func TestAllEntries(t *testing.T) {
 		if len(e.Tags) == 0 {
 			t.Errorf("expected tags for %s", e.Slug)
 		}
+	}
+}
+
+// exportFormat builds the same markdown as cmdExport for a single entry.
+func exportFormat(e *db.Entry) string {
+	var sb strings.Builder
+	sb.WriteString("---\n")
+	sb.WriteString(fmt.Sprintf("title: %q\n", e.Title))
+	sb.WriteString(fmt.Sprintf("kind: %s\n", e.Kind))
+	sb.WriteString(fmt.Sprintf("language: %s\n", e.Language))
+	sb.WriteString(fmt.Sprintf("domain: %s\n", e.Domain))
+	sb.WriteString(fmt.Sprintf("project: %s\n", e.Project))
+	if len(e.Tags) > 0 {
+		sb.WriteString(fmt.Sprintf("tags: [%s]\n", strings.Join(e.Tags, ", ")))
+	} else {
+		sb.WriteString("tags: []\n")
+	}
+	if e.Description != "" {
+		sb.WriteString(fmt.Sprintf("description: %q\n", e.Description))
+	}
+	sb.WriteString("---\n\n")
+	sb.WriteString(e.Content)
+	sb.WriteString("\n")
+	return sb.String()
+}
+
+func TestImportExportRoundTrip(t *testing.T) {
+	s, ts := setup(t)
+	createEntry(t, ts.URL, "imp1", "Import One", "Body content here.", "skill", "rust", "cli", "", []string{"rust", "cli"})
+
+	entry, err := s.DB.GetEntry(context.Background(), "imp1")
+	if err != nil {
+		t.Fatalf("get entry: %v", err)
+	}
+
+	dir := t.TempDir()
+	filename := filepath.Join(dir, "imp1.md")
+	if err := os.WriteFile(filename, []byte(exportFormat(entry)), 0o644); err != nil {
+		t.Fatalf("write export file: %v", err)
+	}
+
+	if err := s.DB.DeleteEntry(context.Background(), "imp1"); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+
+	content, err := os.ReadFile(filename)
+	if err != nil {
+		t.Fatalf("read file: %v", err)
+	}
+	e, err := importfm.ParseImportFile(content, filename)
+	if err != nil {
+		t.Fatalf("parse import: %v", err)
+	}
+	if err := s.DB.CreateEntry(context.Background(), e); err != nil {
+		t.Fatalf("create after import: %v", err)
+	}
+
+	_, text, isErr := toolCall(t, ts.URL, "get_entry", map[string]any{"slug": "imp1"})
+	if isErr {
+		t.Fatalf("get_entry after import failed: %s", text)
+	}
+	var got db.Entry
+	if err := json.Unmarshal([]byte(text), &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got.Title != "Import One" || got.Content != "Body content here." {
+		t.Errorf("entry mismatch: title=%q content=%q", got.Title, got.Content)
+	}
+	if got.Kind != "skill" || got.Language != "rust" || got.Domain != "cli" {
+		t.Errorf("entry meta: kind=%q lang=%q domain=%q", got.Kind, got.Language, got.Domain)
+	}
+
+	// Import same file again must fail (duplicate slug)
+	e2, err := importfm.ParseImportFile(content, filename)
+	if err != nil {
+		t.Fatalf("second parse: %v", err)
+	}
+	if createErr := s.DB.CreateEntry(context.Background(), e2); createErr == nil {
+		t.Fatal("expected duplicate error on second import")
+	} else if !strings.Contains(createErr.Error(), "UNIQUE") {
+		t.Errorf("expected UNIQUE error, got: %v", createErr)
 	}
 }
 

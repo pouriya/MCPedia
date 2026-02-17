@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/pouriya/mcpedia/internal/db"
+	"github.com/pouriya/mcpedia/internal/importfm"
 	"github.com/pouriya/mcpedia/internal/mcp"
 )
 
@@ -42,6 +43,8 @@ func main() {
 		cmdUnlock(os.Args[2:])
 	case "export":
 		cmdExport(os.Args[2:])
+	case "import":
+		cmdImport(os.Args[2:])
 	case "help", "-h", "--help":
 		printUsage()
 	default:
@@ -66,6 +69,7 @@ Commands:
   lock     Lock the database (prevent AI writes)
   unlock   Unlock the database
   export   Export entries as markdown files
+  import   Import a single entry from an export-format markdown file
 
 Environment variables:
   MCPEDIA_DB      Database path (default: %s)
@@ -452,6 +456,57 @@ func cmdExport(args []string) {
 		fmt.Printf("Exported: %s\n", filename)
 	}
 	fmt.Printf("\n%d entries exported to %s/\n", len(entries), *out)
+}
+
+// --- import ---
+
+func cmdImport(args []string) {
+	fs := flag.NewFlagSet("import", flag.ExitOnError)
+	dbPath := fs.String("db", "", "Database path")
+	file := fs.String("file", "", "Path to export-format markdown file (required)")
+	fs.Parse(args)
+
+	path := resolve(*dbPath, "MCPEDIA_DB", defaultDB)
+
+	if *file == "" {
+		fmt.Fprintln(os.Stderr, "Error: --file is required")
+		fs.Usage()
+		os.Exit(1)
+	}
+
+	content, err := os.ReadFile(*file)
+	if err != nil {
+		fatal("read file: %v", err)
+	}
+
+	e, err := importfm.ParseImportFile(content, *file)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+
+	d, err := db.Open(path)
+	if err != nil {
+		fatal("open db: %v", err)
+	}
+	defer d.Close()
+
+	if err := d.CreateEntry(context.Background(), e); err != nil {
+		if strings.Contains(err.Error(), "UNIQUE") {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			fmt.Fprintln(os.Stderr, "Entry already exists. Remove it and retry if you want to replace it.")
+		} else {
+			fatal("create: %v", err)
+		}
+		os.Exit(1)
+	}
+
+	fmt.Printf("Entry imported: %s (%s)\n", e.Slug, e.Title)
+	fmt.Printf("  Kind: %s  Language: %s  Domain: %s  Project: %s\n", e.Kind, e.Language, e.Domain, e.Project)
+	if len(e.Tags) > 0 {
+		fmt.Printf("  Tags: %s\n", strings.Join(e.Tags, ", "))
+	}
+	fmt.Printf("  Content: %d bytes\n", len(e.Content))
 }
 
 // --- helpers ---
