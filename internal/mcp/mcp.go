@@ -3,9 +3,11 @@ package mcp
 import (
 	"context"
 	"crypto/rand"
+	_ "embed"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -17,6 +19,9 @@ import (
 
 	"github.com/pouriya/mcpedia/internal/db"
 )
+
+//go:embed defaults/how-to-use.md
+var defaultHowToUseContent string
 
 const (
 	protocolVersion  = "2025-11-25"
@@ -321,7 +326,12 @@ func (s *Server) toolGetEntry(ctx context.Context, id any, args map[string]any) 
 	}
 	entry, err := s.DB.GetEntry(ctx, slug)
 	if err != nil {
-		return toolError(id, err.Error())
+		if slug == howToUseSlug && errors.Is(err, db.ErrNotFound) {
+			e := defaultHowToUseEntry()
+			entry = &e
+		} else {
+			return toolError(id, err.Error())
+		}
 	}
 	slog.Info("tool call", "tool", "get_entry", "slug", slug)
 	return toolResult(id, entry)
@@ -442,6 +452,38 @@ func (s *Server) toolDeleteEntry(ctx context.Context, id any, args map[string]an
 
 // --- Resources ---
 
+const howToUseSlug = "how-to-use"
+
+const (
+	defaultHowToUseTitle       = "How to Use MCPedia"
+	defaultHowToUseDescription = "Instructions for AI agents: read this first to learn how to use MCPedia tools, resources, and prompts"
+)
+
+func defaultHowToUseEntry() db.Entry {
+	return db.Entry{
+		Slug:        howToUseSlug,
+		Title:       defaultHowToUseTitle,
+		Description: defaultHowToUseDescription,
+		Content:     strings.TrimSpace(defaultHowToUseContent),
+		Kind:        "guide",
+		Tags:        []string{"mcpedia", "usage", "ai-agents"},
+		Version:     1,
+	}
+}
+
+const howToUseURI = "mcpedia://how-to-use"
+
+// filterHowToUseFromList excludes how-to-use from the resources list; it is accessed via the dedicated URI instead.
+func filterHowToUseFromList(entries []db.Entry) []db.Entry {
+	out := make([]db.Entry, 0, len(entries))
+	for _, e := range entries {
+		if e.Slug != howToUseSlug {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
 func (s *Server) handleResourcesList(ctx context.Context, req jsonrpcRequest) *jsonrpcResponse {
 	var params struct {
 		Cursor string `json:"cursor"`
@@ -462,6 +504,9 @@ func (s *Server) handleResourcesList(ctx context.Context, req jsonrpcRequest) *j
 	if err != nil {
 		return rpcErr(req.ID, -32603, err.Error())
 	}
+
+	// Exclude how-to-use from list; it is accessed via mcpedia://how-to-use
+	entries = filterHowToUseFromList(entries)
 
 	// Apply pagination
 	end := offset + resourcesPerPage
@@ -502,14 +547,46 @@ func (s *Server) handleResourcesRead(ctx context.Context, req jsonrpcRequest) *j
 		return rpcErr(req.ID, -32602, "Invalid params")
 	}
 
+	// Dedicated how-to-use URI (no slug param)
+	if params.URI == howToUseURI {
+		var content string
+		entry, err := s.DB.GetEntry(ctx, howToUseSlug)
+		if err != nil {
+			if errors.Is(err, db.ErrNotFound) {
+				content = strings.TrimSpace(defaultHowToUseContent)
+			} else {
+				return rpcErr(req.ID, -32002, err.Error())
+			}
+		} else {
+			content = entry.Content
+		}
+		slog.Info("resource call", "resource", "read", "uri", howToUseURI)
+		return rpcResult(req.ID, map[string]any{
+			"contents": []map[string]any{
+				{
+					"uri":      howToUseURI,
+					"mimeType": "text/markdown",
+					"text":     content,
+				},
+			},
+		})
+	}
+
 	slug := strings.TrimPrefix(params.URI, "mcpedia://entries/")
 	if slug == "" || slug == params.URI {
 		return rpcErr(req.ID, -32002, "Invalid resource URI: "+params.URI)
 	}
 
+	var content string
 	entry, err := s.DB.GetEntry(ctx, slug)
 	if err != nil {
-		return rpcErr(req.ID, -32002, err.Error())
+		if slug == howToUseSlug && errors.Is(err, db.ErrNotFound) {
+			content = strings.TrimSpace(defaultHowToUseContent)
+		} else {
+			return rpcErr(req.ID, -32002, err.Error())
+		}
+	} else {
+		content = entry.Content
 	}
 
 	slog.Info("resource call", "resource", "read", "slug", slug)
@@ -518,16 +595,22 @@ func (s *Server) handleResourcesRead(ctx context.Context, req jsonrpcRequest) *j
 			{
 				"uri":      params.URI,
 				"mimeType": "text/markdown",
-				"text":     entry.Content,
+				"text":     content,
 			},
 		},
 	})
 }
 
 func (s *Server) handleResourcesTemplatesList(req jsonrpcRequest) *jsonrpcResponse {
-	slog.Info("resource call", "resource", "templates_list", "items", 1)
+	slog.Info("resource call", "resource", "templates_list", "items", 2)
 	return rpcResult(req.ID, map[string]any{
 		"resourceTemplates": []map[string]any{
+			{
+				"uriTemplate": howToUseURI,
+				"name":        "How to Use MCPedia",
+				"description": "Usage instructions for AI agents - read this first to learn how to use MCPedia",
+				"mimeType":    "text/markdown",
+			},
 			{
 				"uriTemplate": "mcpedia://entries/{slug}",
 				"name":        "MCPedia Entry",

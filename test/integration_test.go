@@ -623,6 +623,69 @@ func TestResourcesList(t *testing.T) {
 	}
 }
 
+func TestResourcesListExcludesHowToUse(t *testing.T) {
+	_, ts := setup(t)
+	createEntry(t, ts.URL, "aaa", "AAA", "content", "", "", "", "", nil)
+	args := map[string]any{"slug": "how-to-use", "title": "How-To", "content": "Guide", "description": "Guide"}
+	toolCall(t, ts.URL, "create_entry", args)
+
+	// how-to-use is excluded from list; accessed via mcpedia://how-to-use only
+	_, resp := call(t, ts.URL, "resources/list", 1, nil, nil)
+	if resp.Error != nil {
+		t.Fatalf("error: %+v", resp.Error)
+	}
+	resources := resp.Result.(map[string]any)["resources"].([]any)
+	if len(resources) != 1 {
+		t.Fatalf("expected 1 resource (how-to-use excluded), got %d", len(resources))
+	}
+	if resources[0].(map[string]any)["uri"] == "mcpedia://entries/how-to-use" {
+		t.Error("how-to-use must not appear in resources list")
+	}
+}
+
+func TestResourcesReadHowToUseURI(t *testing.T) {
+	_, ts := setup(t)
+	// mcpedia://how-to-use returns default when not in DB
+	_, resp := call(t, ts.URL, "resources/read", 1, map[string]any{"uri": "mcpedia://how-to-use"}, nil)
+	if resp.Error != nil {
+		t.Fatalf("error: %+v", resp.Error)
+	}
+	contents := resp.Result.(map[string]any)["contents"].([]any)
+	c0 := contents[0].(map[string]any)
+	text := c0["text"].(string)
+	if !strings.Contains(text, "How to Use MCPedia") || !strings.Contains(text, "search_entries") {
+		t.Errorf("expected default how-to-use content; got %s", text[:min(200, len(text))])
+	}
+
+	// User's how-to-use overrides default
+	toolCall(t, ts.URL, "create_entry", map[string]any{"slug": "how-to-use", "title": "Custom", "content": "My custom guide.", "description": "Custom"})
+	_, resp = call(t, ts.URL, "resources/read", 2, map[string]any{"uri": "mcpedia://how-to-use"}, nil)
+	if resp.Error != nil {
+		t.Fatalf("error: %+v", resp.Error)
+	}
+	contents = resp.Result.(map[string]any)["contents"].([]any)
+	text = contents[0].(map[string]any)["text"].(string)
+	if text != "My custom guide." {
+		t.Errorf("expected user's content; got %s", text)
+	}
+}
+
+func TestGetEntryDefaultHowToUse(t *testing.T) {
+	_, ts := setup(t)
+	_, text, isErr := toolCall(t, ts.URL, "get_entry", map[string]any{"slug": "how-to-use"})
+	if isErr {
+		t.Fatalf("get_entry how-to-use should return default: %s", text)
+	}
+	var e db.Entry
+	json.Unmarshal([]byte(text), &e)
+	if e.Slug != "how-to-use" || e.Title != "How to Use MCPedia" {
+		t.Errorf("expected default entry; got slug=%q title=%q", e.Slug, e.Title)
+	}
+	if !strings.Contains(e.Content, "search_entries") {
+		t.Errorf("expected default content with tools; got %s", e.Content[:min(200, len(e.Content))])
+	}
+}
+
 func TestResourcesRead(t *testing.T) {
 	_, ts := setup(t)
 	createEntry(t, ts.URL, "readme", "Read Me", "This is the content.", "", "", "", "", nil)
@@ -658,11 +721,14 @@ func TestResourcesTemplatesList(t *testing.T) {
 		t.Fatalf("error: %+v", resp.Error)
 	}
 	templates := resp.Result.(map[string]any)["resourceTemplates"].([]any)
-	if len(templates) != 1 {
-		t.Errorf("expected 1 template, got %d", len(templates))
+	if len(templates) != 2 {
+		t.Errorf("expected 2 templates, got %d", len(templates))
 	}
-	if templates[0].(map[string]any)["uriTemplate"] != "mcpedia://entries/{slug}" {
-		t.Errorf("uriTemplate: %v", templates[0])
+	if templates[0].(map[string]any)["uriTemplate"] != "mcpedia://how-to-use" {
+		t.Errorf("first template should be how-to-use; got %v", templates[0].(map[string]any)["uriTemplate"])
+	}
+	if templates[1].(map[string]any)["uriTemplate"] != "mcpedia://entries/{slug}" {
+		t.Errorf("second template should be entries; got %v", templates[1].(map[string]any)["uriTemplate"])
 	}
 }
 
@@ -885,6 +951,7 @@ func TestResourcesPagination(t *testing.T) {
 		slug := fmt.Sprintf("pg-%03d", i)
 		createEntry(t, ts.URL, slug, "Page "+slug, "content", "", "", "", "", nil)
 	}
+	// Total: 55 (how-to-use excluded from list)
 
 	_, resp := call(t, ts.URL, "resources/list", 1, nil, nil)
 	result := resp.Result.(map[string]any)

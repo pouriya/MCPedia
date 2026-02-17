@@ -155,7 +155,7 @@ MCPedia implements the MCP protocol version `2025-11-25` over HTTP using JSON-RP
 
 ### Resources
 
-MCPedia exposes entries as MCP resources, allowing clients to browse and read knowledge entries using standard resource URIs.
+MCPedia exposes entries as MCP resources, allowing clients to browse and read knowledge entries using standard resource URIs. Usage instructions are available via a dedicated resource `mcpedia://how-to-use` (see `resources/templates/list`). If you have not added your own `how-to-use` entry, the built-in default is served; creating one replaces it. The how-to-use resource is not listed in `resources/list`—access it via the template URI.
 
 - **`resources/list`**
   - Returns a paginated list of all entries as resources
@@ -172,11 +172,9 @@ MCPedia exposes entries as MCP resources, allowing clients to browse and read kn
   - Returns the entry's full Markdown content
 
 - **`resources/templates/list`**
-  - Returns a URI template for accessing entries:
-    - `uriTemplate`: `mcpedia://entries/{slug}`
-    - `name`: `MCPedia Entry`
-    - `description`: `Access an entry by slug`
-    - `mimeType`: `text/markdown`
+  - Returns URI templates:
+    - `mcpedia://how-to-use` — Usage instructions for AI agents (read this first)
+    - `mcpedia://entries/{slug}` — Access an entry by slug
 
 ### Prompts
 
@@ -258,6 +256,14 @@ mcpedia add \
   --kind skill \
   --language rust \
   --tags rust,errors,result
+```
+
+To customize the usage guide, add your own `how-to-use` entry—it replaces the built-in default. A reference implementation is in `how-to-use.md` at the project root:
+
+```bash
+mcpedia add --slug how-to-use --title "How to Use MCPedia" \
+  --description "Instructions for AI agents: read this first" \
+  --file how-to-use.md --kind guide --tags mcpedia,usage,ai-agents
 ```
 
 ### `mcpedia edit`
